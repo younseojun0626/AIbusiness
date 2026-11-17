@@ -189,9 +189,17 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 # 3) Gemini 설정
 # ─────────────────────────────────────────────
-api_key = get_secret("GEMINI_API_KEY")
+api_key = str(get_secret("GEMINI_API_KEY") or "").strip()
 if not api_key:
     st.error("GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Cloud의 **Settings → Secrets**에 키를 등록해 주세요.")
+    st.stop()
+if not api_key.isascii() or not api_key.isprintable() or " " in api_key:
+    # 키는 HTTP 헤더로 전송되므로 한글·공백·둥근 따옴표(“ ”)·보이지 않는 문자가 섞이면 UnicodeEncodeError가 난다
+    st.error(
+        "GEMINI_API_KEY 값에 영문·숫자가 아닌 문자가 섞여 있어요. "
+        "**Settings → Secrets**에서 예시 문구(한글)나 공백, 둥근 따옴표(“ ”)가 남아 있지 않은지 확인하고 "
+        '`GEMINI_API_KEY = "발급받은 키"` 형식으로 키만 다시 붙여 넣어 주세요.'
+    )
     st.stop()
 
 
@@ -311,6 +319,8 @@ def generate(messages) -> str:
                 last_error = e
                 if search:
                     search_ok = False   # 검색 사용량 초과 등 → 이후로는 검색 없이
+            except Exception as e:      # 네트워크 오류 등 → 앱이 멈추지 않고 안내
+                last_error = e
 
     box.empty()
     code = getattr(last_error, "code", None)

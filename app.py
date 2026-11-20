@@ -11,10 +11,13 @@
   · [H] 장소명 → 네이버지도 링크 자동 변환
   · [I] 👍👎 코스 평가 (👎 시 자동 재추천 + 사이드바 만족도 통계)
   · [J] 🎲 랜덤 데이트 (조건 전부 무작위)
+  · [K] 🗺️ 코스 지도: 장소 번호 마커 + 실제 도로 경로 (course_map.py)
 """
 
 import hmac
 import html
+import queue
+import threading
 import random
 import re
 import uuid
@@ -24,6 +27,8 @@ from urllib.parse import quote
 import streamlit as st
 from google import genai
 from google.genai import errors, types
+
+from course_map import show_course_map, split_course
 
 # ─────────────────────────────────────────────
 # 기본 설정
@@ -205,7 +210,8 @@ if not api_key.isascii() or not api_key.isprintable() or " " in api_key:
 
 @st.cache_resource
 def get_client(key: str) -> genai.Client:
-    return genai.Client(api_key=key)
+    # 요청 전체 마감 90초 (서버에도 전달됨). 첫 글자 대기는 FIRST_TOKEN_TIMEOUT으로 따로 짧게 끊는다.
+    return genai.Client(api_key=key, http_options=types.HttpOptions(timeout=90_000))
 
 
 client = get_client(api_key)
@@ -244,6 +250,13 @@ def build_system_prompt() -> str:
   예) [[블루라인파크|부산 해운대 블루라인파크]], [[모모스커피|부산 영도 모모스커피]]
 - 이 표기는 화면에서 네이버지도 링크로 자동 변환됩니다. 다른 링크(URL)는 직접 쓰지 마세요.
 
+[지도용 장소 데이터 — 매우 중요]
+- 코스를 제안하거나 수정한 답변의 **맨 끝**에, 타임라인의 장소를 방문 순서대로 아래 형식으로 덧붙이세요.
+  이 부분은 화면에 보이지 않고 지도에 경로를 그리는 데만 쓰입니다. 코스 없이 질문만 하는 답변에는 넣지 마세요.
+<course>{{"places": [{{"name": "장소명", "query": "지역 + 장소명", "time": "14:00", "cost": "18,000원", "lat": 35.1556, "lng": 129.0640}}]}}</course>
+- lat/lng는 그 장소의 실제 위도·경도(소수점 4자리 이상)로 정확하게 쓰세요.
+- 플랜 B 장소는 넣지 말고, 타임라인에 있는 장소만 넣으세요. JSON 외의 다른 글은 쓰지 마세요.
+
 [규칙]
 - 장소는 실제로 존재하는 곳을 추천하고, 확실하지 않으면 '(방문 전 영업시간 확인 필요)'라고 표시하세요.
 - 3~5개 장소로 구성하고, 동선이 지그재그가 되지 않도록 가까운 곳끼리 묶으세요.
@@ -272,7 +285,7 @@ def render(text: str) -> str:
     """화면 표시용 변환: 굵은 글씨 + 지도 링크.
     한국어는 '**강조)**를'처럼 조사가 바로 붙으면 마크다운 굵게가 깨지므로 <strong>으로 직접 바꾼다.
     AI 답변 속 HTML은 먼저 이스케이프해 그대로 실행되지 않게 한다."""
-    safe = html.escape(text, quote=False)
+    safe = html.escape(split_course(text)[0], quote=False)   # [K] 지도용 데이터 블록은 숨김
     safe = BOLD_PATTERN.sub(r"<strong>\1</strong>", safe)
     return add_map_links(safe)
 
@@ -285,17 +298,49 @@ def to_gemini_history(messages):
     ]
 
 
-def stream_reply(messages, model: str, search: bool):
+FIRST_TOKEN_TIMEOUT = 15   # 서버가 붐벼 첫 글자가 이 시간(초) 안에 안 오면 다음 모델로
+
+
+def stream_reply(messages, model: str, search: bool, thinking_low: bool = True):
+    """Gemini 응답을 백그라운드 스레드에서 받아 조각(str)으로 내보낸다.
+    첫 조각이 FIRST_TOKEN_TIMEOUT초 안에 오지 않으면 TimeoutError."""
     config = types.GenerateContentConfig(
-        system_instruction=build_system_prompt(),
+        system_instruction=build_system_prompt(),   # session_state를 읽으므로 스레드 밖에서 미리 만든다
         temperature=0.8,
         tools=[types.Tool(google_search=types.GoogleSearch())] if search else None,  # [D]
+        # 생각 단계를 짧게 해서 답이 빨리 시작되게 함 (지원하지 않는 모델은 generate()에서 빼고 재시도)
+        thinking_config=types.ThinkingConfig(thinking_level="low") if thinking_low else None,
     )
-    for chunk in client.models.generate_content_stream(
-        model=model, contents=to_gemini_history(messages), config=config
-    ):
-        if chunk.text:
-            yield chunk.text
+    contents = to_gemini_history(messages)
+    chunks = queue.Queue()
+
+    def worker():
+        try:
+            for chunk in client.models.generate_content_stream(model=model, contents=contents, config=config):
+                if chunk.text:
+                    chunks.put(("text", chunk.text))
+            chunks.put(("done", None))
+        except Exception as e:
+            chunks.put(("error", e))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    def pieces():
+        wait = FIRST_TOKEN_TIMEOUT
+        while True:
+            try:
+                kind, value = chunks.get(timeout=wait)
+            except queue.Empty:
+                raise TimeoutError(f"{model}: {wait}초 동안 응답 없음") from None
+            if kind == "text":
+                wait = 90   # 첫 조각 이후에는 넉넉히 기다림
+                yield value
+            elif kind == "done":
+                return
+            else:
+                raise value
+
+    return pieces()
 
 
 def generate(messages) -> str:
@@ -303,28 +348,37 @@ def generate(messages) -> str:
     box = st.empty()
     search_ok = use_search
     last_error = None
-    for model in models_to_try:
+    for n, model in enumerate(models_to_try):
         for search in ([True, False] if search_ok else [False]):
-            box.markdown("💭 코스를 짜는 중이에요...")
-            text = ""
-            try:
-                for piece in stream_reply(messages, model, search):
-                    text += piece
-                    box.markdown(render(text) + " ▌", unsafe_allow_html=True)
-                box.markdown(render(text), unsafe_allow_html=True)
-                if use_search and not search:
-                    st.caption("ℹ️ 웹 검색을 사용할 수 없어 검색 없이 답변했어요. (방문 전 장소 정보를 확인해 주세요)")
-                return text
-            except errors.APIError as e:
-                last_error = e
-                if search:
-                    search_ok = False   # 검색 사용량 초과 등 → 이후로는 검색 없이
-            except Exception as e:      # 네트워크 오류 등 → 앱이 멈추지 않고 안내
-                last_error = e
+            thinking_low = True
+            while True:
+                box.markdown("💭 코스를 짜는 중이에요..." if n == 0 else
+                             "💭 AI 서버가 붐벼서 다른 모델로 다시 시도하는 중이에요...")
+                text = ""
+                try:
+                    for piece in stream_reply(messages, model, search, thinking_low):
+                        text += piece
+                        box.markdown(render(text) + " ▌", unsafe_allow_html=True)
+                    box.markdown(render(text), unsafe_allow_html=True)
+                    if use_search and not search:
+                        st.caption("ℹ️ 웹 검색을 사용할 수 없어 검색 없이 답변했어요. (방문 전 장소 정보를 확인해 주세요)")
+                    return text
+                except errors.APIError as e:
+                    last_error = e
+                    if e.code == 400 and "hinking" in str(e) and thinking_low:
+                        thinking_low = False   # 이 모델은 생각 단계 설정 미지원 → 설정 없이 재시도
+                        continue
+                    if search:
+                        search_ok = False      # 검색 사용량 초과 등 → 이후로는 검색 없이
+                except Exception as e:         # 시간 초과·네트워크 오류 등 → 다음 모델로
+                    last_error = e
+                break
 
     box.empty()
     code = getattr(last_error, "code", None)
-    if code == 429:
+    if "timeout" in type(last_error).__name__.lower():
+        st.error("AI 서버 응답이 너무 늦어요. 잠시 후 다시 시도해 주세요.")
+    elif code == 429:
         st.error("요청이 너무 많아 잠시 쉬어야 해요. 1분 뒤 다시 시도해 주세요. (무료 사용량 제한)")
     elif code == 503:
         st.error("지금 AI 서버가 혼잡해요. 잠시 후 다시 시도해 주세요.")
@@ -363,11 +417,12 @@ if not ss.messages and not prompt:
             ss.pending_prompt = ex
             st.rerun()
 
-# 지난 대화 출력 (답변마다 👍👎)
+# 지난 대화 출력 (답변마다 지도 + 👍👎)
 for m in ss.messages:
     with st.chat_message(m["role"], avatar=BOT_AVATAR if m["role"] == "assistant" else USER_AVATAR):
         st.markdown(render(m["content"]) if m["role"] == "assistant" else m["content"], unsafe_allow_html=m["role"] == "assistant")
         if m["role"] == "assistant":
+            show_course_map(m.get("places", []), m.get("transport", "대중교통"))
             feedback_widget(m["id"])
 
 if prompt:
@@ -382,7 +437,10 @@ if ss.messages and ss.messages[-1]["role"] == "user":
         reply = generate(ss.messages)
         if reply:
             msg_id = uuid.uuid4().hex
-            ss.messages.append({"id": msg_id, "role": "assistant", "content": reply})
+            places = split_course(reply)[1]
+            ss.messages.append({"id": msg_id, "role": "assistant", "content": reply,
+                                "places": places, "transport": ss.transport})
+            show_course_map(places, ss.transport)
             feedback_widget(msg_id)
     if not reply:
         ss.messages.pop()  # 실패한 질문은 기록에서 제거
@@ -392,7 +450,7 @@ last = next((m for m in reversed(ss.messages) if m["role"] == "assistant"), None
 if last:
     st.download_button(
         "📥 마지막 코스 저장하기 (.md)",
-        data=add_map_links(last["content"]),
+        data=add_map_links(split_course(last["content"])[0]),
         file_name=f"date_course_{datetime.now():%Y%m%d_%H%M}.md",
         mime="text/markdown",
     )

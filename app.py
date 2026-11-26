@@ -12,6 +12,7 @@
   · [I] 👍👎 코스 평가 (👎 시 자동 재추천 + 사이드바 만족도 통계)
   · [J] 🎲 랜덤 데이트 (조건 전부 무작위)
   · [K] 🗺️ 코스 지도: 장소 번호 마커 + 실제 도로 경로 (course_map.py)
+  · [L] ☀️ 데이트 날 일기예보 카드 + AI 코스에 날씨 반영 (weather.py)
 """
 
 import hmac
@@ -29,6 +30,7 @@ from google import genai
 from google.genai import errors, types
 
 from course_map import show_course_map, split_course
+from weather import get_weather, show_weather_card, weather_prompt
 
 # ─────────────────────────────────────────────
 # 기본 설정
@@ -191,6 +193,9 @@ with st.sidebar:
     b2.button("🚪 로그아웃", on_click=logout, use_container_width=True)
 
 
+# [L] 선택한 지역·날짜·시간대의 날씨 (30분 캐시)
+weather = get_weather(ss.region, ss.date_day, ss.time_slot)
+
 # ─────────────────────────────────────────────
 # 3) Gemini 설정
 # ─────────────────────────────────────────────
@@ -235,6 +240,9 @@ def build_system_prompt() -> str:
 - 선호 스타일: {style_text}
 - 기타 요청: {ss.extra or "없음"}
 (사용자가 대화에서 다른 조건을 말하면 대화 내용을 우선합니다.)
+
+[데이트 날 날씨]
+{weather_prompt(weather)}
 
 [코스를 제안할 때 형식]
 1. 한 줄 컨셉 제목 (이모지 포함)
@@ -287,6 +295,7 @@ def render(text: str) -> str:
     AI 답변 속 HTML은 먼저 이스케이프해 그대로 실행되지 않게 한다."""
     safe = html.escape(split_course(text)[0], quote=False)   # [K] 지도용 데이터 블록은 숨김
     safe = BOLD_PATTERN.sub(r"<strong>\1</strong>", safe)
+    safe = safe.replace("~", "\\~")   # '3~4만 원 … 5~6시'처럼 '~'가 두 번 나오면 취소선이 되는 것 방지
     return add_map_links(safe)
 
 
@@ -397,6 +406,7 @@ def feedback_widget(msg_id: str):
 st.title("💕 데이트 코스 플래너")
 st.caption(f"📍 {ss.region or '지역 미정'} · 💰 {ss.budget:,}원 · 🚇 {ss.transport} · 💑 {ss.relationship}"
            " — 조건은 왼쪽 사이드바에서 바꿀 수 있어요")
+show_weather_card(weather)   # [L] 날씨 카드
 
 # 입력: 채팅창 / 예시 버튼 / 랜덤 / 👎 재추천
 prompt = st.chat_input("원하는 데이트를 말해 주세요 (예: 카페를 한 곳 더 넣어줘)")

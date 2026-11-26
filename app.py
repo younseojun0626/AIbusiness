@@ -13,6 +13,7 @@
   · [J] 🎲 랜덤 데이트 (조건 전부 무작위)
   · [K] 🗺️ 코스 지도: 장소 번호 마커 + 실제 도로 경로 (course_map.py)
   · [L] ☀️ 데이트 날 일기예보 카드 + AI 코스에 날씨 반영 (weather.py)
+  · [M] ✅ 추천 장소 실제 존재 확인(카카오) + 없는 장소 자동 교체 (place_check.py)
 """
 
 import hmac
@@ -30,6 +31,7 @@ from google import genai
 from google.genai import errors, types
 
 from course_map import show_course_map, split_course
+from place_check import same_place, verify_places
 from weather import get_weather, show_weather_card, weather_prompt
 
 # ─────────────────────────────────────────────
@@ -213,6 +215,16 @@ if not api_key.isascii() or not api_key.isprintable() or " " in api_key:
     st.stop()
 
 
+# [M] 카카오 REST 키 (선택) — 없으면 장소 확인 단계를 건너뜀
+kakao_key = str(get_secret("KAKAO_REST_API_KEY") or "").strip()
+if kakao_key and not (kakao_key.isascii() and kakao_key.isprintable() and " " not in kakao_key):
+    kakao_key = ""   # 한글·공백이 섞인 잘못된 값은 무시
+
+with st.sidebar:
+    st.caption("✅ 실제 장소 확인: 켜짐 (카카오맵)" if kakao_key else
+               "✅ 실제 장소 확인: 꺼짐 — Secrets에 KAKAO_REST_API_KEY를 넣으면 켜져요")
+
+
 @st.cache_resource
 def get_client(key: str) -> genai.Client:
     # 요청 전체 마감 90초 (서버에도 전달됨). 첫 글자 대기는 FIRST_TOKEN_TIMEOUT으로 따로 짧게 끊는다.
@@ -266,7 +278,9 @@ def build_system_prompt() -> str:
 - 플랜 B 장소는 넣지 말고, 타임라인에 있는 장소만 넣으세요. JSON 외의 다른 글은 쓰지 마세요.
 
 [규칙]
-- 장소는 실제로 존재하는 곳을 추천하고, 확실하지 않으면 '(방문 전 영업시간 확인 필요)'라고 표시하세요.
+- 장소는 실제로 존재한다고 확신하는 곳만 추천하세요. 이름을 지어내지 말고, 잘 모르는 동네면 유명한 명소·체인점을 우선하세요.
+- 장소명은 카카오맵·네이버지도에 등록된 정식 상호로 쓰세요 (체인점은 '스타벅스 서면점'처럼 지점명까지).
+- 추천 장소는 카카오맵으로 실제 존재 여부를 자동 확인하며, 찾을 수 없는 곳은 교체를 요청받게 됩니다.
 - 3~5개 장소로 구성하고, 동선이 지그재그가 되지 않도록 가까운 곳끼리 묶으세요.
 - 조건이 부족하면 코스를 먼저 하나 제안한 뒤, 더 맞춤형으로 바꾸기 위한 질문을 1~2개 덧붙이세요.
 - 사용자가 "카페 바꿔줘", "더 저렴하게"처럼 수정을 요청하면 이전 코스를 바탕으로 해당 부분만 고쳐 전체 코스를 다시 보여주세요.
@@ -279,24 +293,32 @@ def build_system_prompt() -> str:
 PLACE_PATTERN = re.compile(r"\[\[([^\[\]|\n]{1,50})(?:\|([^\[\]\n]{1,80}))?\]\]")
 
 
-def add_map_links(text: str) -> str:
+def add_map_links(text: str, checks: dict | None = None) -> str:
+    """[[장소명|검색어]] → 지도 링크. [M] 카카오에서 확인된 곳은 ✅ + 카카오맵 상세 페이지,
+    확인되지 않은 곳은 ⚠️ + 네이버지도 검색, 확인 전이면 네이버지도 검색."""
+    checks = checks or {}
+
     def repl(m):
         name, query = m.group(1).strip(), (m.group(2) or m.group(1)).strip()
-        return f"[📍{name}](https://map.naver.com/p/search/{quote(query)})"
+        info = checks.get(name)
+        if info:
+            return f"[📍{name}✅]({info['url']})"
+        mark = "⚠️" if name in checks else ""
+        return f"[📍{name}{mark}](https://map.naver.com/p/search/{quote(query)})"
     return PLACE_PATTERN.sub(repl, text)
 
 
 BOLD_PATTERN = re.compile(r"\*\*(.+?)\*\*")
 
 
-def render(text: str) -> str:
+def render(text: str, checks: dict | None = None) -> str:
     """화면 표시용 변환: 굵은 글씨 + 지도 링크.
     한국어는 '**강조)**를'처럼 조사가 바로 붙으면 마크다운 굵게가 깨지므로 <strong>으로 직접 바꾼다.
     AI 답변 속 HTML은 먼저 이스케이프해 그대로 실행되지 않게 한다."""
     safe = html.escape(split_course(text)[0], quote=False)   # [K] 지도용 데이터 블록은 숨김
     safe = BOLD_PATTERN.sub(r"<strong>\1</strong>", safe)
     safe = safe.replace("~", "\\~")   # '3~4만 원 … 5~6시'처럼 '~'가 두 번 나오면 취소선이 되는 것 방지
-    return add_map_links(safe)
+    return add_map_links(safe, checks)
 
 
 def to_gemini_history(messages):
@@ -352,16 +374,16 @@ def stream_reply(messages, model: str, search: bool, thinking_low: bool = True):
     return pieces()
 
 
-def generate(messages) -> str:
-    """답변을 실시간으로 화면에 그리고, 실패하면 검색 없이 / 다음 모델로 재시도."""
-    box = st.empty()
+def generate(messages, box=None, status: str = "💭 코스를 짜는 중이에요...") -> str:
+    """답변을 실시간으로 화면(box)에 그리고, 실패하면 검색 없이 / 다음 모델로 재시도."""
+    box = box or st.empty()
     search_ok = use_search
     last_error = None
     for n, model in enumerate(models_to_try):
         for search in ([True, False] if search_ok else [False]):
             thinking_low = True
             while True:
-                box.markdown("💭 코스를 짜는 중이에요..." if n == 0 else
+                box.markdown(status if n == 0 else
                              "💭 AI 서버가 붐벼서 다른 모델로 다시 시도하는 중이에요...")
                 text = ""
                 try:
@@ -394,6 +416,65 @@ def generate(messages) -> str:
     else:
         st.error(f"AI 응답 중 오류가 발생했어요: {last_error}")
     return ""
+
+
+FIX_PROMPT = ("방금 코스에서 {names}은(는) 카카오맵에서 찾을 수 없었어요. 이 장소만 같은 동네에서 실제로 영업 중인 "
+              "유명한 다른 곳으로 바꾸고, 나머지 장소는 그대로 둔 채 전체 코스를 같은 형식(장소 표기 규칙과 <course> 데이터 포함)으로 "
+              "다시 보여주세요. 바꾼 사실이나 이유는 따로 설명하지 마세요.")
+
+
+def check_places(reply: str, box):
+    """[M] 답변 속 장소를 카카오맵에서 확인하고, 없는 곳은 AI에게 한 번 교체를 요청한다.
+    반환: (최종 답변, {장소명: 카카오정보 또는 None}, 오류 문구)"""
+    if not kakao_key:
+        return reply, {}, None
+    status = st.empty()
+    status.caption("🔎 추천한 장소가 실제로 있는지 카카오맵에서 확인하는 중...")
+
+    def verify(text):
+        coords = {p["name"]: (p["lat"], p["lng"]) for p in split_course(text)[1]}
+        return verify_places(kakao_key, text, coords)
+
+    checks, error = verify(reply)
+    missing = [name for name, info in checks.items() if info is None]
+    if missing and not error:
+        status.caption(f"♻️ 카카오맵에서 찾을 수 없는 장소({', '.join(missing)})를 실제 장소로 바꾸는 중...")
+        retry = ss.messages + [{"role": "assistant", "content": reply},
+                               {"role": "user", "content": FIX_PROMPT.format(names=", ".join(missing))}]
+        fixed = generate(retry, box, "♻️ 실제로 있는 장소로 바꾸는 중이에요...")
+        if fixed:
+            reply = fixed
+            checks, error = verify(reply)
+    status.empty()
+    box.markdown(render(reply, checks), unsafe_allow_html=True)
+    return reply, checks, error
+
+
+def apply_checks(places, checks):
+    """지도용 장소에 카카오 확인 결과(정확한 좌표·주소·링크)를 덮어쓴다."""
+    result = []
+    for p in places:
+        # 본문 장소명과 지도 데이터 장소명이 조금 다를 수 있어 비슷한 이름도 찾는다
+        key = p["name"] if p["name"] in checks else next((n for n in checks if same_place(n, p["name"])), None)
+        info = checks.get(key) if key else None
+        if info:
+            p = {**p, "lat": info["lat"], "lng": info["lng"], "address": info["address"],
+                 "url": info["url"], "verified": True}
+        elif key:
+            p = {**p, "verified": False}
+        result.append(p)
+    return result
+
+
+def show_check_summary(checks: dict, error: str | None):
+    if error:
+        st.caption(f"⚠️ 장소 확인을 하지 못했어요: {error}")
+    elif checks:
+        ok = sum(1 for v in checks.values() if v)
+        text = f"✅ 추천 장소 {len(checks)}곳 중 {ok}곳을 카카오맵에서 확인했어요."
+        if ok < len(checks):
+            text += " ⚠️ 표시된 곳은 확인되지 않았으니 방문 전 꼭 검색해 보세요."
+        st.caption(text)
 
 
 def feedback_widget(msg_id: str):
@@ -430,8 +511,10 @@ if not ss.messages and not prompt:
 # 지난 대화 출력 (답변마다 지도 + 👍👎)
 for m in ss.messages:
     with st.chat_message(m["role"], avatar=BOT_AVATAR if m["role"] == "assistant" else USER_AVATAR):
-        st.markdown(render(m["content"]) if m["role"] == "assistant" else m["content"], unsafe_allow_html=m["role"] == "assistant")
+        st.markdown(render(m["content"], m.get("checks")) if m["role"] == "assistant" else m["content"],
+                    unsafe_allow_html=m["role"] == "assistant")
         if m["role"] == "assistant":
+            show_check_summary(m.get("checks", {}), m.get("check_error"))
             show_course_map(m.get("places", []), m.get("transport", "대중교통"))
             feedback_widget(m["id"])
 
@@ -444,12 +527,15 @@ if prompt:
 # (답변 생성 중 다른 버튼을 눌러 중단된 경우도 여기서 이어서 답변)
 if ss.messages and ss.messages[-1]["role"] == "user":
     with st.chat_message("assistant", avatar=BOT_AVATAR):
-        reply = generate(ss.messages)
+        box = st.empty()
+        reply = generate(ss.messages, box)
         if reply:
+            reply, checks, check_error = check_places(reply, box)   # [M] 실제 장소 확인·교체
             msg_id = uuid.uuid4().hex
-            places = split_course(reply)[1]
-            ss.messages.append({"id": msg_id, "role": "assistant", "content": reply,
-                                "places": places, "transport": ss.transport})
+            places = apply_checks(split_course(reply)[1], checks)
+            ss.messages.append({"id": msg_id, "role": "assistant", "content": reply, "places": places,
+                                "transport": ss.transport, "checks": checks, "check_error": check_error})
+            show_check_summary(checks, check_error)
             show_course_map(places, ss.transport)
             feedback_widget(msg_id)
     if not reply:
@@ -460,7 +546,7 @@ last = next((m for m in reversed(ss.messages) if m["role"] == "assistant"), None
 if last:
     st.download_button(
         "📥 마지막 코스 저장하기 (.md)",
-        data=add_map_links(split_course(last["content"])[0]),
+        data=add_map_links(split_course(last["content"])[0], last.get("checks")),
         file_name=f"date_course_{datetime.now():%Y%m%d_%H%M}.md",
         mime="text/markdown",
     )

@@ -15,6 +15,7 @@ Streamlit과 Google Gemini로 만든 **대화형 데이트 코스 추천 웹앱*
 | 🔎 실시간 웹 검색 | Gemini의 Google 검색 기능으로 실제 장소 추천 (유료 키 전용, 기본 꺼짐) |
 | 📍 네이버지도 링크 | 추천 장소를 누르면 네이버지도 검색으로 연결 |
 | 🗺️ 코스 지도 | 답변마다 번호 마커 + 실제 도로 경로(OpenStreetMap·OSRM), 구간별 거리·시간 (`course_map.py`) |
+| ✅ 실제 장소 확인 | 추천 장소를 카카오맵에서 검색해 확인(✅), 없는 장소는 AI가 자동 교체, 지도는 카카오 좌표 사용 (`place_check.py`, 선택: `KAKAO_REST_API_KEY`) |
 | ☀️ 날씨 반영 | 데이트 날·시간대 일기예보 카드(Open-Meteo), 비·추위에 맞춰 AI가 코스 조정 (`weather.py`) |
 | 👍👎 코스 평가 | 👎를 누르면 새 코스 자동 추천, 사이드바에 만족도 통계 |
 | 🎲 랜덤 데이트 | 지역·시간대·예산·이동수단·취향·테마를 무작위로 정해 깜짝 코스 추천 |
@@ -35,8 +36,11 @@ streamlit run app.py
    ```toml
    GEMINI_API_KEY = "Google AI Studio에서 발급받은 키"
    APP_PASSWORD = "pnumis"
+   KAKAO_REST_API_KEY = "카카오 REST API 키"   # 선택: 실제 장소 확인
    ```
 4. 생성된 `https://….streamlit.app` 주소를 PPT에 넣습니다.
 
 Gemini API 키는 https://aistudio.google.com/apikey 에서 무료로 발급받을 수 있습니다.
 기본 모델은 `gemini-3.8-flash`이며, 혼잡(503)·사용량 초과(429) 시 `gemini-3.5-flash` → `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` 순으로 자동 전환합니다.
+
+카카오 REST API 키는 https://developers.kakao.com 에서 앱을 만든 뒤 **앱 키 → REST API 키**를 복사하고, 왼쪽 메뉴 **카카오맵**에서 사용 설정을 ON으로 켜야 동작합니다.

@@ -162,10 +162,17 @@ def _build_map(places, segments) -> folium.Map:
     for i, p in enumerate(places):
         name = html.escape(p["name"])
         detail = " · ".join(html.escape(x) for x in (p["time"], p["cost"]) if x)
-        link = f"https://map.naver.com/p/search/{quote(p['query'])}"
+        if p.get("verified"):                       # [M] 카카오에서 확인된 장소
+            status = f"✅ {html.escape(p.get('address', ''))}"
+            link_html = f"<a href='{html.escape(p['url'])}' target='_blank'>카카오맵에서 보기 ↗</a>"
+        else:
+            status = "⚠️ 카카오맵에서 확인되지 않은 장소" if p.get("verified") is False else ""
+            link_html = (f"<a href='https://map.naver.com/p/search/{quote(p['query'])}' "
+                         "target='_blank'>네이버지도에서 검색 ↗</a>")
         popup = (f"<div style='font-size:13px;line-height:1.5'><b>{CIRCLED[i]} {name}</b><br>"
-                 f"{detail}<br><a href='{link}' target='_blank'>네이버지도에서 보기 ↗</a></div>")
-        badge = (f"<div style='background:{COLOR};color:#fff;border:2px solid #fff;border-radius:50%;"
+                 f"{detail}<br>{status}<br>{link_html}</div>")
+        color = "#9E9E9E" if p.get("verified") is False else COLOR
+        badge = (f"<div style='background:{color};color:#fff;border:2px solid #fff;border-radius:50%;"
                  "width:28px;height:28px;display:flex;align-items:center;justify-content:center;"
                  f"font-weight:700;font-size:14px;box-shadow:0 1px 4px rgba(0,0,0,.4)'>{i + 1}</div>")
         folium.Marker([p["lat"], p["lng"]], tooltip=f"{i + 1}. {name}",
@@ -192,7 +199,12 @@ def show_course_map(places, transport: str):
         total = sum(s["distance"] for s in segments)
         st.markdown(f"**🗺️ 이동 경로** · 총 {_fmt_distance(total)}  \n" +
                     "  \n".join(_segment_label(s) for s in segments))
-    notes = ["📍 위치는 AI가 추정한 좌표라 실제와 조금 다를 수 있어요. 정확한 위치는 마커를 눌러 네이버지도로 확인하세요."]
+    if all(p.get("verified") for p in places):
+        notes = ["📍 모든 장소를 카카오맵에 등록된 위치로 표시했어요."]
+    elif any(p.get("verified") for p in places):
+        notes = ["📍 ✅ 장소는 카카오맵 등록 위치, 회색 마커는 확인되지 않은 곳(AI 추정 위치)이에요."]
+    else:
+        notes = ["📍 위치는 AI가 추정한 좌표라 실제와 조금 다를 수 있어요. 정확한 위치는 마커를 눌러 확인하세요."]
     if any(s["mode"] == "대중교통" for s in segments):
         notes.append("점선은 버스·지하철로 이동하는 구간이에요 (도로 기준으로 표시).")
     notes.append("경로: OpenStreetMap · OSRM")

@@ -31,8 +31,8 @@ from google import genai
 from google.genai import errors, types
 
 from course_map import show_course_map, split_course
-from place_check import same_place, verify_places
-from weather import get_weather, show_weather_card, weather_prompt
+from place_check import nearby_candidates, same_place, verify_places
+from weather import CITY_COORDS, find_city, get_weather, show_weather_card, weather_prompt
 
 # ─────────────────────────────────────────────
 # 기본 설정
@@ -419,8 +419,20 @@ def generate(messages, box=None, status: str = "💭 코스를 짜는 중이에�
 
 
 FIX_PROMPT = ("방금 코스에서 {names}은(는) 카카오맵에서 찾을 수 없었어요. 이 장소만 같은 동네에서 실제로 영업 중인 "
-              "유명한 다른 곳으로 바꾸고, 나머지 장소는 그대로 둔 채 전체 코스를 같은 형식(장소 표기 규칙과 <course> 데이터 포함)으로 "
+              "다른 곳으로 바꾸고, 나머지 장소는 그대로 둔 채 전체 코스를 같은 형식(장소 표기 규칙과 <course> 데이터 포함)으로 "
               "다시 보여주세요. 바꾼 사실이나 이유는 따로 설명하지 마세요.")
+FIX_CANDIDATES = ("\n\n아래는 카카오맵에서 찾은 근처의 실제 장소 목록이에요. 바꿀 장소는 반드시 이 목록에서 코스 분위기에 맞게 고르고, "
+                  "장소명은 목록에 적힌 그대로(지점명 포함) 쓰세요.\n{candidates}")
+
+
+def search_center(text: str, checks: dict):
+    """교체 후보를 찾을 중심 좌표: 확인된 장소들의 평균 → AI 좌표 평균 → 지역 도시 좌표."""
+    points = [(v["lat"], v["lng"]) for v in checks.values() if v]
+    points = points or [(p["lat"], p["lng"]) for p in split_course(text)[1]]
+    if points:
+        return (sum(p[0] for p in points) / len(points), sum(p[1] for p in points) / len(points))
+    city = find_city(ss.region)
+    return CITY_COORDS[city] if city else None
 
 
 def check_places(reply: str, box):
@@ -433,14 +445,19 @@ def check_places(reply: str, box):
 
     def verify(text):
         coords = {p["name"]: (p["lat"], p["lng"]) for p in split_course(text)[1]}
-        return verify_places(kakao_key, text, coords)
+        city = find_city(ss.region)
+        return verify_places(kakao_key, text, coords, CITY_COORDS[city] if city else None)
 
     checks, error = verify(reply)
     missing = [name for name, info in checks.items() if info is None]
     if missing and not error:
         status.caption(f"♻️ 카카오맵에서 찾을 수 없는 장소({', '.join(missing)})를 실제 장소로 바꾸는 중...")
-        retry = ss.messages + [{"role": "assistant", "content": reply},
-                               {"role": "user", "content": FIX_PROMPT.format(names=", ".join(missing))}]
+        fix = FIX_PROMPT.format(names=", ".join(missing))
+        center = search_center(reply, checks)
+        candidates = nearby_candidates(kakao_key, center, exclude=missing) if center else ""
+        if candidates:   # 실제 장소 목록 안에서만 고르게 해서 교체한 곳이 확실히 확인되도록
+            fix += FIX_CANDIDATES.format(candidates=candidates)
+        retry = ss.messages + [{"role": "assistant", "content": reply}, {"role": "user", "content": fix}]
         fixed = generate(retry, box, "♻️ 실제로 있는 장소로 바꾸는 중이에요...")
         if fixed:
             reply = fixed

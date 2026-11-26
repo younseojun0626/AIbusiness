@@ -15,8 +15,11 @@ import requests
 import streamlit as st
 
 KAKAO_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
+KAKAO_CATEGORY_URL = "https://dapi.kakao.com/v2/local/search/category.json"
+CATEGORIES = {"CE7": "카페", "FD6": "음식점", "AT4": "관광명소", "CT1": "문화시설"}
 PLACE_PATTERN = re.compile(r"\[\[([^\[\]|\n]{1,50})(?:\|([^\[\]\n]{1,80}))?\]\]")
 MAX_DISTANCE_M = 8000      # AI 좌표와 이보다 멀면 같은 이름의 다른 지역 가게로 보고 제외
+CITY_DISTANCE_M = 30000    # AI 좌표가 없는 장소(플랜 B 등)는 지역 도시 중심에서 이 거리 안이어야 함
 SIMILARITY = 0.8           # 이름 유사도 기준 (0~1)
 
 
@@ -67,15 +70,16 @@ def _kakao_search(key: str, query: str) -> list:
     return res.json().get("documents", [])
 
 
-def _verify_one(key: str, name: str, query: str, hint):
-    """장소 하나 확인 → 카카오 정보 dict 또는 None. hint = AI가 준 (lat, lng) 또는 None."""
+def _verify_one(key: str, name: str, query: str, hint, max_distance: float):
+    """장소 하나 확인 → 카카오 정보 dict 또는 None.
+    hint = 기준 좌표 (lat, lng) 또는 None, max_distance = 기준 좌표에서 허용 거리(m)."""
     for q in dict.fromkeys([query, name]):          # 검색어로 먼저, 안 되면 이름만으로
         docs = _kakao_search(key, q)   # 키·네트워크 오류는 예외로 올라가 '없는 장소'와 구분된다
         for d in docs:
             if not same_place(name, d["place_name"]):
                 continue
             lat, lng = float(d["y"]), float(d["x"])
-            if hint and _distance_m(hint[0], hint[1], lat, lng) > MAX_DISTANCE_M:
+            if hint and _distance_m(hint[0], hint[1], lat, lng) > max_distance:
                 continue
             return {
                 "name": d["place_name"],
@@ -87,15 +91,18 @@ def _verify_one(key: str, name: str, query: str, hint):
     return None
 
 
-def verify_places(key: str, text: str, coords: dict):
+def verify_places(key: str, text: str, coords: dict, city_center=None):
     """답변 속 모든 장소 확인.
     반환: ({장소명: 카카오정보 또는 None}, 오류메시지 또는 None)
-    coords = {장소명: (lat, lng)} — AI가 지도용으로 준 좌표 (같은 이름 다른 지역 구분용)"""
+    coords = {장소명: (lat, lng)} — AI가 지도용으로 준 좌표 (같은 이름 다른 지역 가게 구분용)
+    city_center = 지역 도시 좌표 — AI 좌표가 없는 장소(플랜 B 등)의 기준"""
     places = extract_places(text)
     if not places:
         return {}, None
     with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {name: pool.submit(_verify_one, key, name, query, coords.get(name))
+        futures = {name: pool.submit(_verify_one, key, name, query,
+                                     coords.get(name) or city_center,
+                                     MAX_DISTANCE_M if name in coords else CITY_DISTANCE_M)
                    for name, query in places.items()}
     results, error = {}, None
     for name, fut in futures.items():
@@ -110,3 +117,29 @@ def verify_places(key: str, text: str, coords: dict):
     if error:        # 검색 자체가 안 되면 '없는 장소'로 판정하지 않음
         return {}, error
     return results, None
+
+
+# ─────────────────────────────────────────────
+# 교체용 후보: 근처의 실제 장소 목록
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=86400, show_spinner=False)
+def _kakao_category(key: str, code: str, lat: float, lng: float) -> list:
+    res = requests.get(KAKAO_CATEGORY_URL, headers={"Authorization": f"KakaoAK {key}"}, timeout=6, params={
+        "category_group_code": code, "x": lng, "y": lat, "radius": 1500, "sort": "accuracy", "size": 15})
+    res.raise_for_status()
+    return res.json().get("documents", [])
+
+
+def nearby_candidates(key: str, center, exclude=(), per_category: int = 10) -> str:
+    """center(lat, lng) 근처의 실제 카페·음식점·관광명소·문화시설 이름 목록(문자열). 실패하면 ''."""
+    lat, lng = round(center[0], 3), round(center[1], 3)    # 캐시가 잘 맞도록 반올림
+    lines = []
+    for code, label in CATEGORIES.items():
+        try:
+            docs = _kakao_category(key, code, lat, lng)
+        except Exception:
+            continue
+        names = [d["place_name"] for d in docs if d["place_name"] not in exclude][:per_category]
+        if names:
+            lines.append(f"- {label}: " + ", ".join(names))
+    return "\n".join(lines)

@@ -294,15 +294,15 @@ PLACE_PATTERN = re.compile(r"\[\[([^\[\]|\n]{1,50})(?:\|([^\[\]\n]{1,80}))?\]\]"
 
 
 def add_map_links(text: str, checks: dict | None = None) -> str:
-    """[[장소명|검색어]] → 지도 링크. [M] 카카오에서 확인된 곳은 ✅ + 카카오맵 상세 페이지,
-    확인되지 않은 곳은 ⚠️ + 네이버지도 검색, 확인 전이면 네이버지도 검색."""
+    """[[장소명|검색어]] → 네이버지도 링크 (국내 이용자가 가장 많은 지도라 위치 확인용으로 사용).
+    [M] 카카오에서 확인된 곳은 ✅ + 정식 상호·구 이름으로 검색, 확인되지 않은 곳은 ⚠️."""
     checks = checks or {}
 
     def repl(m):
         name, query = m.group(1).strip(), (m.group(2) or m.group(1)).strip()
         info = checks.get(name)
         if info:
-            return f"[📍{name}✅]({info['url']})"
+            return f"[📍{name}✅]({info['naver_url']})"
         mark = "⚠️" if name in checks else ""
         return f"[📍{name}{mark}](https://map.naver.com/p/search/{quote(query)})"
     return PLACE_PATTERN.sub(repl, text)
@@ -476,7 +476,7 @@ def apply_checks(places, checks):
         info = checks.get(key) if key else None
         if info:
             p = {**p, "lat": info["lat"], "lng": info["lng"], "address": info["address"],
-                 "url": info["url"], "verified": True}
+                 "url": info["naver_url"], "verified": True}
         elif key:
             p = {**p, "verified": False}
         result.append(p)

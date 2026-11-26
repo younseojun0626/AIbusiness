@@ -2,7 +2,8 @@
 [M] 실제 장소 검증 — 카카오 로컬 장소 검색 API (무료, REST 키 필요)
 
 AI가 추천한 장소([[장소명|검색어]])를 카카오맵에서 하나씩 검색해
-  · 찾으면  → 카카오에 등록된 정식 이름·주소·좌표·상세 페이지 링크로 교체 (✅)
+  · 찾으면  → 카카오에 등록된 정식 이름·주소·좌표로 교체 (✅)
+              사용자에게 보여주는 위치 링크는 국내 이용자가 더 많은 네이버지도로 연결
   · 못 찾으면 → None (app.py가 AI에게 다른 실제 장소로 바꿔 달라고 다시 요청)
 """
 
@@ -10,6 +11,7 @@ import math
 import re
 from concurrent.futures import ThreadPoolExecutor
 from difflib import SequenceMatcher
+from urllib.parse import quote
 
 import requests
 import streamlit as st
@@ -81,9 +83,13 @@ def _verify_one(key: str, name: str, query: str, hint, max_distance: float):
             lat, lng = float(d["y"]), float(d["x"])
             if hint and _distance_m(hint[0], hint[1], lat, lng) > max_distance:
                 continue
+            address = d.get("road_address_name") or d.get("address_name", "")
+            area = " ".join((d.get("address_name") or address).split()[:2])   # 예: '부산 부산진구'
             return {
                 "name": d["place_name"],
-                "address": d.get("road_address_name") or d.get("address_name", ""),
+                "address": address,
+                # 확인된 정식 상호 + 구 이름으로 네이버지도 검색 → 같은 이름의 다른 지점과 헷갈리지 않음
+                "naver_url": f"https://map.naver.com/p/search/{quote((area + ' ' + d['place_name']).strip())}",
                 "category": (d.get("category_name") or "").split(" > ")[-1],
                 "lat": lat, "lng": lng,
                 "url": d.get("place_url") or f"https://map.kakao.com/link/search/{d['place_name']}",

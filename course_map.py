@@ -164,7 +164,7 @@ def _build_map(places, segments) -> folium.Map:
         detail = " · ".join(html.escape(x) for x in (p["time"], p["cost"]) if x)
         if p.get("verified"):                       # [M] 카카오에서 확인된 장소
             status = f"✅ {html.escape(p.get('address', ''))}"
-            link_html = f"<a href='{html.escape(p['url'])}' target='_blank'>카카오맵에서 보기 ↗</a>"
+            link_html = f"<a href='{html.escape(p['url'])}' target='_blank'>네이버지도에서 보기 ↗</a>"
         else:
             status = "⚠️ 카카오맵에서 확인되지 않은 장소" if p.get("verified") is False else ""
             link_html = (f"<a href='https://map.naver.com/p/search/{quote(p['query'])}' "

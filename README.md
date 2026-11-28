@@ -3,7 +3,9 @@
 Streamlit과 Google Gemini로 만든 **대화형 데이트 코스 추천 웹앱**입니다.
 지역·예산·취향을 정하고 챗봇과 대화하면 시간순 데이트 코스를 짜 줍니다.
 
+- 앱 주소: https://aibusiness-gcdefapp5l8qzdtwrxtfddt.streamlit.app
 - 접속 비밀번호: `pnumis`
+- 설명서: [`docs/데이트코스플래너_설명서.pdf`](docs/데이트코스플래너_설명서.pdf) (PPT: `docs/데이트코스플래너_설명서.pptx`)
 
 ## 주요 기능
 | 기능 | 설명 |
